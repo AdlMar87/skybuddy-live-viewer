@@ -17,7 +17,7 @@ footer{padding:12px 18px;color:#b6c7d5;font-size:12px;line-height:1.5}
 </style></head><body>
 <header><h1>🪂 Skybuddy Live-Flug</h1><div id="status" role="status">Flugstatus wird geladen …</div>
 <div id="stats"><div class="stat"><small>Höhe</small><b id="alt">—</b></div>
-<div class="stat"><small>Geschwindigkeit</small><b id="speed">—</b></div></div></header>
+<div class="stat"><small>Geschwindigkeit</small><b id="speed">—</b></div><div class="stat"><small>Steigen / Sinken</small><b id="climb">—</b></div></div></header>
 <div id="map" aria-label="Live-Flugkarte"></div>
 <footer>GPS-Daten können bei Funklöchern verzögert eintreffen. Keine Notruf- oder Rettungsfunktion. Der Pilot kann die Freigabe jederzeit beenden.</footer>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -27,6 +27,7 @@ const token=new URLSearchParams(location.search).get('token')||'';
 const status=document.getElementById('status');
 const alt=document.getElementById('alt');
 const speed=document.getElementById('speed');
+const climb=document.getElementById('climb');
 const valid=/^[a-f0-9]{64}$/.test(token);
 const map=L.map('map').setView([47.2,9.7],9);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
@@ -36,7 +37,7 @@ let marker=null,line=null,centered=false,lastGood=null;
 function reset(){
  if(marker){map.removeLayer(marker);marker=null;}
  if(line){map.removeLayer(line);line=null;}
- alt.textContent=speed.textContent='—';lastGood=null;centered=false;
+ alt.textContent=speed.textContent=climb.textContent='—';lastGood=null;centered=false;
 }
 async function refresh(){
  if(!valid){status.textContent='Ungültiger Tracking-Link.';return;}
@@ -54,6 +55,9 @@ async function refresh(){
   'Letzte GPS-Position vor '+age+' Sekunden';
  alt.textContent=typeof data.altitude==='number'?Math.round(data.altitude)+' m':'—';
  speed.textContent=typeof data.speed==='number'?Math.round(data.speed)+' km/h':'—';
+ const vertical=typeof data.climb==='number'?data.climb:null;
+ climb.textContent=vertical===null?'—':(vertical>0?'+':'')+vertical.toFixed(1)+' m/s';
+ climb.style.color=vertical===null?'#f2f7fb':vertical>0.1?'#71dccb':vertical< -0.1?'#ff9a9a':'#f2f7fb';
  if(typeof data.lat!=='number'||typeof data.lon!=='number')return;
  const point=[data.lat,data.lon];
  if(!marker)marker=L.marker(point).addTo(map);else marker.setLatLng(point);
