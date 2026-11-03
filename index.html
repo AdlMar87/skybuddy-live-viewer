@@ -23,7 +23,24 @@ footer{padding:12px 18px;color:#b6c7d5;font-size:12px;line-height:1.5}
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 'use strict';
-const token=new URLSearchParams(location.search).get('token')||'';
+function readTrackingToken(location) {
+ const query=new URLSearchParams(location.search);
+ if(query.has('token')){
+  const legacy=query.get('token')||'';
+  return /^[a-f0-9]{64}$/.test(legacy)?legacy:'';
+ }
+ const compact=location.hash.slice(1);
+ if(!/^[A-Za-z0-9_-]{43}$/.test(compact))return '';
+ try{
+  const bytes=atob(compact.replace(/-/g,'+').replace(/_/g,'/')+'=');
+  if(bytes.length!==32)return '';
+  // Reject alternate/non-canonical spellings without dropping any key bits.
+  const canonical=btoa(bytes).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  if(canonical!==compact)return '';
+  return Array.from(bytes,b=>b.charCodeAt(0).toString(16).padStart(2,'0')).join('');
+ }catch{return '';}
+}
+const token=readTrackingToken(location);
 const status=document.getElementById('status');
 const alt=document.getElementById('alt');
 const speed=document.getElementById('speed');
