@@ -11,23 +11,23 @@ const sequence = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 async function openViewer(suffix, data = { status: 'unavailable' }) {
-  const requests = [], elements = new Map();
+  const requests = [], elements = new Map(), lines = [];
   const map = { setView() { return this; }, removeLayer() {} };
-  const layer = { addTo() { return this; }, setLatLng() {} };
+  const layer = { addTo() { return this; }, setLatLng() {}, setOpacity() {}, bindTooltip() {} };
   const context = vm.createContext({
     location: new URL('https://adlmar87.github.io/skybuddy-live-viewer/' + suffix),
     URLSearchParams, atob, btoa, encodeURIComponent, console,
-    setInterval() {},
+    setInterval() {}, setTimeout: (fn,ms) => { const timer=setTimeout(fn,ms); timer.unref(); return timer; }, clearTimeout, AbortController,
     document: { getElementById(id) {
-      if (!elements.has(id)) elements.set(id, { textContent: '', style: {} });
+      if (!elements.has(id)) elements.set(id, { textContent: '', style: {}, dataset: {} });
       return elements.get(id);
     } },
-    L: { map: () => map, tileLayer: () => layer, marker: () => layer, polyline: () => layer },
+    L: { map: () => map, tileLayer: () => layer, marker: () => layer, polyline: (coords) => { lines.push(coords); return layer; } },
     fetch: async (url, options) => { requests.push({ url, options }); return { ok: true, json: async () => data }; },
   });
   vm.runInContext(script, context);
   await tick();
-  return { requests, elements };
+  return { requests, elements, context, lines };
 }
 
 test('compact links preserve the exact 256-bit key sent to the existing API', async () => {
@@ -68,7 +68,7 @@ test('legacy query cannot be silently replaced by a different fragment key', asy
 
 test('an unavailable flight still clears values and shows no released flight', async () => {
   const { elements } = await openViewer('#' + sequence.toString('base64url'));
-  assert.equal(elements.get('status').textContent, 'Aktuell kein freigegebener Flug.');
+  assert.equal(elements.get('status').textContent, 'Live-Link derzeit nicht freigegeben');
   assert.equal(elements.get('alt').textContent, '—');
   assert.equal(elements.get('speed').textContent, '—');
 });
@@ -82,3 +82,48 @@ test('compact link still renders active flight measurements', async () => {
   assert.equal(elements.get('speed').textContent, '32 km/h');
   if (elements.has('climb')) assert.equal(elements.get('climb').textContent, '+1.5 m/s');
 });
+
+
+ test('age keeps advancing without a successful refresh and hides stale instruments', async () => {
+  const {elements,context}=await openViewer('#'+sequence.toString('base64url'),{
+    status:'active',last_at:new Date(Date.now()-20000).toISOString(),lat:47,lon:9,
+    altitude:1200,speed:32,climb:2,points:[]});
+  assert.match(elements.get('status').textContent,/Position aktuell/);
+  vm.runInContext('snapshot.last_at=new Date(Date.now()-120000).toISOString();renderStatus()',context);
+  assert.match(elements.get('position-age').textContent,/2 Min/);
+  assert.match(elements.get('status').textContent,/Keine neue Position/);
+  assert.equal(elements.get('speed').textContent,'—');
+  vm.runInContext('networkFailed=true;renderStatus()',context);
+  assert.match(elements.get('status').textContent,/Live-Anzeige unterbrochen/);
+  assert.match(elements.get('position-age').textContent,/2 Min/);
+ });
+ test('missing and invalid timestamps never claim live',async()=>{
+  for(const time of [null,'invalid',new Date(Date.now()+120000).toISOString()]){
+   const {elements}=await openViewer('#'+sequence.toString('base64url'),{
+    status:'active',last_at:time,lat:47,lon:9,altitude:1200,points:[]});
+   assert.doesNotMatch(elements.get('status').textContent,/Position aktuell/);
+   assert.equal(elements.get('alt').textContent,'—');
+  }
+ });
+ test('ending sharing clears old measurements and age',async()=>{
+  const {elements,context}=await openViewer('#'+sequence.toString('base64url'),{
+   status:'active',last_at:new Date().toISOString(),lat:47,lon:9,altitude:1200,points:[]});
+  vm.runInContext("snapshot={status:'inactive'};reset();renderStatus()",context);
+  assert.equal(elements.get('alt').textContent,'—');
+  assert.equal(elements.get('position-age').textContent,'');
+  assert.equal(elements.get('status').textContent,'Aktuell kein freigegebener Flug.');
+ });
+
+ test('route is chronological and does not bridge GPS gaps',async()=>{
+  const start=Date.now()-120000;
+  const p=(seconds,lat)=>({at:new Date(start+seconds*1000).toISOString(),lat,lon:9});
+  const {lines}=await openViewer('#'+sequence.toString('base64url'),{
+   status:'active',last_at:new Date().toISOString(),lat:47,lon:9,
+   points:[p(100,47.3),p(10,47.1),p(90,47.2),p(0,47)]});
+  assert.deepEqual(JSON.parse(JSON.stringify(lines[0])),[[[47,9],[47.1,9]],[[47.2,9],[47.3,9]]]);
+ });
+ test('overlapping refreshes do not start concurrent requests',async()=>{
+  const {context}=await openViewer('#'+sequence.toString('base64url'));
+  vm.runInContext("globalThis.calls=0;fetch=()=>{calls++;return new Promise(()=>{});};refresh();refresh()",context);
+  assert.equal(vm.runInContext('calls',context),1);
+ });

@@ -9,13 +9,14 @@
 body{margin:0;background:#0c1726;color:#f2f7fb;font:16px system-ui,sans-serif}
 header{padding:18px 18px 14px;background:#142337}
 h1{font-size:21px;margin:0 0 9px;color:#71dccb}
-#status{font-size:15px;line-height:1.5}#stats{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
+#status{font-size:16px;line-height:1.5;font-weight:650}#position-age{margin-top:6px;color:#bed1e1;font-size:14px;line-height:1.5}#stats[data-stale="true"]{opacity:.65}#stats{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
 .stat{background:#1e3247;padding:10px 14px;border-radius:12px;min-width:110px}
 .stat b{display:block;font-size:20px}.stat small{color:#bed1e1}
 #map{height:calc(100dvh - 230px);min-height:300px;background:#182a3a}
 footer{padding:12px 18px;color:#b6c7d5;font-size:12px;line-height:1.5}
 </style></head><body>
 <header><h1>🪂 Skybuddy Live-Flug</h1><div id="status" role="status">Flugstatus wird geladen …</div>
+<div id="position-age"></div>
 <div id="stats"><div class="stat"><small>Höhe</small><b id="alt">—</b></div>
 <div class="stat"><small>Geschwindigkeit</small><b id="speed">—</b></div><div class="stat"><small>Steigen / Sinken</small><b id="climb">—</b></div></div></header>
 <div id="map" aria-label="Live-Flugkarte"></div>
@@ -45,48 +46,93 @@ const status=document.getElementById('status');
 const alt=document.getElementById('alt');
 const speed=document.getElementById('speed');
 const climb=document.getElementById('climb');
+const ageLabel=document.getElementById('position-age');
+const stats=document.getElementById('stats');
 const valid=/^[a-f0-9]{64}$/.test(token);
 const map=L.map('map').setView([47.2,9.7],9);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
  attribution:'© OpenStreetMap contributors',maxZoom:18
 }).addTo(map);
 let marker=null,line=null,centered=false,lastGood=null;
+let snapshot=null,networkFailed=false,fetching=false;
 function reset(){
  if(marker){map.removeLayer(marker);marker=null;}
  if(line){map.removeLayer(line);line=null;}
  alt.textContent=speed.textContent=climb.textContent='—';lastGood=null;centered=false;
 }
-async function refresh(){
+function ageText(seconds){
+ if(seconds<60)return seconds+' Sekunden';
+ if(seconds<3600)return Math.floor(seconds/60)+' Min. '+seconds%60+' Sek.';
+ return Math.floor(seconds/3600)+' Std. '+Math.floor(seconds%3600/60)+' Min.';
+}
+function renderStatus(){
  if(!valid){status.textContent='Ungültiger Tracking-Link.';return;}
- try{
- const response=await fetch('https://phxuztvjbvsxykzaedci.supabase.co/functions/v1/skybuddy-live?token='+encodeURIComponent(token),
- {cache:'no-store',referrerPolicy:'no-referrer'});
- if(!response.ok)throw Error('Datenabruf fehlgeschlagen');
- const data=await response.json();
- if(data.status!=='active'){
-  reset();status.textContent='Aktuell kein freigegebener Flug.';return;
- }
- const age=data.last_at?Math.max(0,Math.round((Date.now()-Date.parse(data.last_at))/1000)):null;
- status.textContent=age===null?'Flug aktiv · Noch keine GPS-Position':
-  (age>60?'⚠ Signal unterbrochen · ':'● Live · ')+
-  'Letzte GPS-Position vor '+age+' Sekunden';
- alt.textContent=typeof data.altitude==='number'?Math.round(data.altitude)+' m':'—';
- speed.textContent=typeof data.speed==='number'?Math.round(data.speed)+' km/h':'—';
- const vertical=typeof data.climb==='number'?data.climb:null;
+ const stamp=snapshot?.last_at?Date.parse(snapshot.last_at):NaN;
+ const elapsed=Date.now()-stamp;
+ const known=Number.isFinite(elapsed)&&elapsed>=-30000;
+ const age=known?Math.max(0,Math.floor(elapsed/1000)):null;
+ const active=snapshot?.status==='active';
+ const fresh=active&&validPoint(snapshot)&&!networkFailed&&age!==null&&age<=60;
+ stats.dataset.stale=String(!fresh);
+ status.style.color=fresh?'#71dccb':'#ffce87';
+ ageLabel.textContent=active&&age!==null
+  ? 'Letzte GPS-Position vor '+ageText(age)+' · '+new Date(stamp).toLocaleTimeString('de-AT')
+  : '';
+ if(networkFailed){
+  status.textContent='Verbindung zur Live-Anzeige unterbrochen';
+  ageLabel.textContent+=(ageLabel.textContent?' — ':'')+'Aktueller Flugstatus nicht verfügbar.';
+ }else if(!snapshot){status.textContent='Flugstatus wird geladen …';}
+ else if(snapshot.status!=='active'){
+  status.textContent=snapshot.status==='unavailable'
+   ? 'Live-Link derzeit nicht freigegeben' : 'Aktuell kein freigegebener Flug.';
+ }else if(!snapshot.last_at||!validPoint(snapshot)){status.textContent='Übertragung gestartet · Warte auf GPS';}
+ else if(!known){status.textContent='Positionszeit unklar · Keine aktuelle Position bestätigt';}
+ else if(!fresh){status.textContent='Keine neue Position · Signal möglicherweise unterbrochen';}
+ else {status.textContent='● Live · Position aktuell';}
+ // Old speed and climb readings must not look like current flight instruments.
+ const number=v=>typeof v==='number'&&Number.isFinite(v);
+ alt.textContent=fresh&&number(snapshot.altitude)?Math.round(snapshot.altitude)+' m':'—';
+ speed.textContent=fresh&&number(snapshot.speed)?Math.round(snapshot.speed)+' km/h':'—';
+ const vertical=fresh&&number(snapshot.climb)?snapshot.climb:null;
  climb.textContent=vertical===null?'—':(vertical>0?'+':'')+vertical.toFixed(1)+' m/s';
  climb.style.color=vertical===null?'#f2f7fb':vertical>0.1?'#71dccb':vertical< -0.1?'#ff9a9a':'#f2f7fb';
- if(typeof data.lat!=='number'||typeof data.lon!=='number')return;
+ if(marker){marker.setOpacity(fresh?1:.55);marker.bindTooltip(fresh?'Aktuelle Position':'Letzte bekannte Position');}
+}
+const validPoint=p=>p&&Number.isFinite(p.lat)&&Number.isFinite(p.lon)&&Math.abs(p.lat)<=90&&Math.abs(p.lon)<=180;
+async function refresh(){
+ if(!valid){renderStatus();return;}
+ if(fetching)return;
+ fetching=true;
+ const controller=new AbortController();
+ const timeout=setTimeout(()=>controller.abort(),12000);
+ try{
+ const response=await fetch('https://phxuztvjbvsxykzaedci.supabase.co/functions/v1/skybuddy-live?token='+encodeURIComponent(token),
+ {cache:'no-store',referrerPolicy:'no-referrer',signal:controller.signal});
+ if(response.status===404){snapshot={status:'unavailable'};networkFailed=false;reset();renderStatus();return;}
+ if(!response.ok)throw Error('Datenabruf fehlgeschlagen');
+ const data=await response.json();
+ if(!data||!['active','inactive','unavailable'].includes(data.status))throw Error('Ungültiger Flugstatus');
+ snapshot=data;networkFailed=false;
+ if(data.status!=='active'){reset();renderStatus();return;}
+ if(!validPoint(data)){reset();renderStatus();return;}
  const point=[data.lat,data.lon];
  if(!marker)marker=L.marker(point).addTo(map);else marker.setLatLng(point);
  if(!centered){map.setView(point,13);centered=true;}
- const coords=(data.points||[]).filter(p=>typeof p.lat==='number'&&typeof p.lon==='number')
- .map(p=>[p.lat,p.lon]).reverse();
- if(line)map.removeLayer(line);
- if(coords.length>1)line=L.polyline(coords,{color:'#71dccb',weight:4}).addTo(map);
- lastGood=data.last_at;
- }catch(e){
-  status.textContent='⚠ Verbindung unterbrochen – angezeigte Position möglicherweise veraltet.';
+ // Break the line across missing fixes rather than drawing a flown shortcut.
+ const ordered=(Array.isArray(data.points)?data.points:[]).filter(p=>validPoint(p)&&Number.isFinite(Date.parse(p.at)))
+  .sort((a,b)=>Date.parse(a.at)-Date.parse(b.at));
+ const segments=[];let segment=[],previous=null;
+ for(const p of ordered){
+  if(previous!==null&&Date.parse(p.at)-previous>30000){if(segment.length>1)segments.push(segment);segment=[];}
+  segment.push([p.lat,p.lon]);previous=Date.parse(p.at);
  }
+ if(segment.length>1)segments.push(segment);
+ if(line){map.removeLayer(line);line=null;}
+ if(segments.length)line=L.polyline(segments,{color:'#71dccb',weight:4}).addTo(map);
+ lastGood=data.last_at;
+ renderStatus();
+ }catch(e){networkFailed=true;renderStatus();}
+ finally{clearTimeout(timeout);fetching=false;}
 }
-refresh();setInterval(refresh,10000);
+refresh();setInterval(refresh,10000);setInterval(renderStatus,1000);
 </script></body></html>
